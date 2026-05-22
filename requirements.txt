@@ -1,0 +1,8 @@
+# No third-party dependencies required.
+# Uses only Python 3.11+ standard library:
+#   - re, dataclasses, datetime, collections, pathlib
+#   - json, urllib.request, argparse, sys
+#
+# Optional: install for development/testing
+# pytest>=8.0
+# pytest-cov>=5.0

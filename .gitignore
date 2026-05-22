@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+*.pyo
+sample_auth.log
+*.json
+*.txt.out
+report.*
