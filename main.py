@@ -15,8 +15,13 @@ import argparse
 import sys
 from pathlib import Path
 
+import os
+
+from abuseipdb import enrich_anomalies
 from allowlist import load_allowlist
 from anomaly_detector import run_detection
+from email_alerts import send_alert
+from journalctl_parser import parse_journalctl_file
 from log_parser import parse_file
 from ollama_client import OllamaClient, DEFAULT_BASE_URL, DEFAULT_MODEL
 from report_generator import (
@@ -85,10 +90,27 @@ def parse_args() -> argparse.Namespace:
         help="Save text report to FILE (also prints to stdout)",
     )
     parser.add_argument(
+        "--format",
+        choices=["auto", "auth", "journalctl"],
+        default="auto",
+        help="Log format: auto-detect, auth log, or journalctl JSON (default: auto)",
+    )
+    parser.add_argument(
         "--allowlist",
         metavar="FILE",
         default=None,
         help="YAML allowlist file of trusted IPs/users to skip (default: none)",
+    )
+    parser.add_argument(
+        "--abuseipdb",
+        metavar="API_KEY",
+        default=None,
+        help="AbuseIPDB API key for IP reputation lookup (or set ABUSEIPDB_API_KEY env var)",
+    )
+    parser.add_argument(
+        "--email",
+        action="store_true",
+        help="Send email alert on CRITICAL/HIGH findings (configure via ALERT_SMTP_* env vars)",
     )
     parser.add_argument(
         "--no-color",
@@ -186,9 +208,28 @@ def main() -> int:
         print(f"ERROR: Log file not found: {log_path}", file=sys.stderr)
         return 1
 
+    # Detect format
+    fmt = args.format
+    if fmt == "auto":
+        # Peek at first non-empty line to detect journalctl JSON
+        try:
+            with open(log_path, "r", errors="replace") as fh:
+                for line in fh:
+                    stripped = line.strip()
+                    if stripped:
+                        fmt = "journalctl" if stripped.startswith("{") else "auth"
+                        break
+                else:
+                    fmt = "auth"
+        except OSError:
+            fmt = "auth"
+
     # Parse
-    print(f"Parsing {log_path} ...", flush=True)
-    events = parse_file(log_path)
+    print(f"Parsing {log_path} (format: {fmt}) ...", flush=True)
+    if fmt == "journalctl":
+        events = parse_journalctl_file(log_path)
+    else:
+        events = parse_file(log_path)
     print(f"  {len(events):,} events parsed.", flush=True)
 
     if not events:
@@ -213,6 +254,12 @@ def main() -> int:
     print("Running anomaly detection ...", flush=True)
     anomalies = run_detection(events, allowlist_ips=allowlist_ips or None, allowlist_users=allowlist_users or None)
     print(f"  {len(anomalies)} anomalies found.", flush=True)
+
+    # AbuseIPDB enrichment
+    abuseipdb_key = args.abuseipdb or os.environ.get("ABUSEIPDB_API_KEY", "")
+    if abuseipdb_key and anomalies:
+        print("Running AbuseIPDB IP reputation lookup ...", flush=True)
+        enrich_anomalies(anomalies, api_key=abuseipdb_key, verbose=args.verbose)
 
     # AI analysis
     ai_assessment: str | None = None
@@ -276,6 +323,15 @@ def main() -> int:
         )
         save_report(json_report, args.json_out)
         print(f"JSON report saved: {args.json_out}")
+
+    # Email alert for CRITICAL or HIGH findings
+    if args.email:
+        alert_worthy = [a for a in anomalies if a.severity in ("CRITICAL", "HIGH")]
+        if alert_worthy:
+            print("Sending email alert ...", flush=True)
+            send_alert(alert_worthy, log_path, ai_assessment, verbose=True)
+        else:
+            print("No CRITICAL/HIGH anomalies — email skipped.")
 
     # Exit code reflects highest severity
     if any(a.severity == "CRITICAL" for a in anomalies):

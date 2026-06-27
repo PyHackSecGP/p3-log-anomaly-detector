@@ -31,8 +31,12 @@ class Anomaly:
     first_seen: Optional[datetime] = None
     last_seen: Optional[datetime] = None
     raw_events: list[str] = field(default_factory=list)
-    mitre_id: str = ""     # ATT&CK technique ID, e.g. "T1110"
-    mitre_name: str = ""   # ATT&CK technique name
+    mitre_id: str = ""       # ATT&CK technique ID, e.g. "T1110"
+    mitre_name: str = ""     # ATT&CK technique name
+    confidence: float = 0.0  # 0.0–1.0 detection confidence
+    abuse_score: int = -1    # AbuseIPDB confidence score, -1 = not checked
+    abuse_reports: int = -1  # AbuseIPDB total report count
+    geo_country: str = ""    # country code from AbuseIPDB
 
 
 def _severity_label(count: int, thresholds: tuple[int, int, int]) -> str:
@@ -84,6 +88,7 @@ def detect_brute_force(events: list[LogEvent]) -> list[Anomaly]:
                     category="brute_force",
                     mitre_id="T1110",
                     mitre_name="Brute Force",
+                    confidence=min(1.0, round(len(window_events) / 50, 2)),
                     title=f"SSH Brute Force from {ip}",
                     description=(
                         f"{len(window_events)} failed login attempts from {ip} "
@@ -143,6 +148,7 @@ def detect_privilege_escalation(events: list[LogEvent]) -> list[Anomaly]:
             category="privilege_escalation",
             mitre_id="T1548",
             mitre_name="Abuse Elevation Control Mechanism",
+            confidence=min(1.0, round(len(evs) / 10, 2)),
             title=f"Repeated sudo failures by {user}",
             description=f"User '{user}' failed sudo authentication {len(evs)} time(s).",
             username=user,
@@ -161,6 +167,7 @@ def detect_privilege_escalation(events: list[LogEvent]) -> list[Anomaly]:
             category="privilege_escalation",
             mitre_id="T1548",
             mitre_name="Abuse Elevation Control Mechanism",
+            confidence=0.85,
             title="su to root detected",
             description=f"Session opened as root {len(su_roots)} time(s) via su.",
             username="root",
@@ -180,6 +187,7 @@ def detect_privilege_escalation(events: list[LogEvent]) -> list[Anomaly]:
             category="privilege_escalation",
             mitre_id="T1136",
             mitre_name="Create Account",
+            confidence=1.0,
             title=f"New user account(s) created",
             description=f"useradd was called {len(user_creates)} time(s). Users: {', '.join(usernames)}.",
             count=len(user_creates),
@@ -198,6 +206,7 @@ def detect_privilege_escalation(events: list[LogEvent]) -> list[Anomaly]:
             category="privilege_escalation",
             mitre_id="T1078",
             mitre_name="Valid Accounts",
+            confidence=1.0,
             title="Direct root login detected",
             description=f"Root logins from IPs: {', '.join(ips)}. Count: {len(root_logins)}.",
             source_ip=", ".join(ips) or None,
@@ -248,6 +257,7 @@ def detect_unusual_ips(events: list[LogEvent]) -> list[Anomaly]:
                 category="unusual_ip",
                 mitre_id="T1110",
                 mitre_name="Brute Force",
+                confidence=min(1.0, round(len(failures_before) / 20, 2)),
                 title=f"Successful login after {len(failures_before)} failures from {ip}",
                 description=(
                     f"IP {ip} had {len(failures_before)} failed attempts before "
@@ -273,6 +283,7 @@ def detect_unusual_ips(events: list[LogEvent]) -> list[Anomaly]:
             category="unusual_ip",
             mitre_id="T1110",
             mitre_name="Brute Force",
+            confidence=min(1.0, round(len(all_failure_ips) / 30, 2)),
             title=f"Distributed brute force from {len(all_failure_ips)} IPs",
             description=(
                 f"{total_distributed} total failed attempts spread across "
