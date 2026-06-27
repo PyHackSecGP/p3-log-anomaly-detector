@@ -45,7 +45,8 @@ def build_anomaly_summary_text(anomalies: list[Anomaly]) -> str:
 
     lines: list[str] = []
     for a in anomalies:
-        lines.append(f"[{a.anomaly_id}] {a.severity} — {a.title}")
+        mitre = f"  [{a.mitre_id}]" if a.mitre_id else ""
+        lines.append(f"[{a.anomaly_id}] {a.severity} — {a.title}{mitre}")
         lines.append(f"  Category: {a.category}")
         lines.append(f"  {a.description}")
         if a.source_ip:
@@ -125,7 +126,8 @@ def generate_text_report(
         lines.append(bold("DETECTED ANOMALIES"))
         lines.append("-" * 65)
         for a in anomalies:
-            header = f"  [{a.anomaly_id}] {c(a.severity, a.severity)} — {a.title}"
+            mitre_tag = f" \033[2m[{a.mitre_id}]\033[0m" if (colored and a.mitre_id) else (f" [{a.mitre_id}]" if a.mitre_id else "")
+            header = f"  [{a.anomaly_id}] {c(a.severity, a.severity)} — {a.title}{mitre_tag}"
             lines.append(header)
             lines.append(f"    {a.description}")
             details: list[str] = []
@@ -192,6 +194,8 @@ def generate_json_report(
             "id": a.anomaly_id,
             "severity": a.severity,
             "category": a.category,
+            "mitre_id": a.mitre_id,
+            "mitre_name": a.mitre_name,
             "title": a.title,
             "description": a.description,
             "source_ip": a.source_ip,

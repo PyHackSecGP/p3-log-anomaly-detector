@@ -1,0 +1,11 @@
+# Known-good IPs and users — events matching these are skipped during detection.
+# Add your own workstation, jump box, monitoring agent IPs here.
+
+ips:
+  - 10.0.1.1       # workstation
+  - 100.71.84.2    # kali VM (Tailscale)
+  - 127.0.0.1      # localhost
+
+users:
+  - tony
+  - deploy

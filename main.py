@@ -15,6 +15,7 @@ import argparse
 import sys
 from pathlib import Path
 
+from allowlist import load_allowlist
 from anomaly_detector import run_detection
 from log_parser import parse_file
 from ollama_client import OllamaClient, DEFAULT_BASE_URL, DEFAULT_MODEL
@@ -82,6 +83,12 @@ def parse_args() -> argparse.Namespace:
         metavar="FILE",
         dest="text_out",
         help="Save text report to FILE (also prints to stdout)",
+    )
+    parser.add_argument(
+        "--allowlist",
+        metavar="FILE",
+        default=None,
+        help="YAML allowlist file of trusted IPs/users to skip (default: none)",
     )
     parser.add_argument(
         "--no-color",
@@ -188,9 +195,23 @@ def main() -> int:
         print("No parseable events found. Check the log format.", file=sys.stderr)
         return 1
 
+    # Load allowlist if provided
+    allowlist_ips: set[str] = set()
+    allowlist_users: set[str] = set()
+    if args.allowlist:
+        try:
+            allowlist_ips, allowlist_users = load_allowlist(args.allowlist)
+            print(
+                f"Allowlist loaded: {len(allowlist_ips)} IPs, "
+                f"{len(allowlist_users)} users from {args.allowlist}",
+                flush=True,
+            )
+        except (OSError, ValueError) as exc:
+            print(f"  WARNING: Could not load allowlist: {exc}", flush=True)
+
     # Detect anomalies
     print("Running anomaly detection ...", flush=True)
-    anomalies = run_detection(events)
+    anomalies = run_detection(events, allowlist_ips=allowlist_ips or None, allowlist_users=allowlist_users or None)
     print(f"  {len(anomalies)} anomalies found.", flush=True)
 
     # AI analysis

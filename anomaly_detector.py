@@ -31,6 +31,8 @@ class Anomaly:
     first_seen: Optional[datetime] = None
     last_seen: Optional[datetime] = None
     raw_events: list[str] = field(default_factory=list)
+    mitre_id: str = ""     # ATT&CK technique ID, e.g. "T1110"
+    mitre_name: str = ""   # ATT&CK technique name
 
 
 def _severity_label(count: int, thresholds: tuple[int, int, int]) -> str:
@@ -80,6 +82,8 @@ def detect_brute_force(events: list[LogEvent]) -> list[Anomaly]:
                     anomaly_id=f"BF-{seq:03d}",
                     severity=severity,
                     category="brute_force",
+                    mitre_id="T1110",
+                    mitre_name="Brute Force",
                     title=f"SSH Brute Force from {ip}",
                     description=(
                         f"{len(window_events)} failed login attempts from {ip} "
@@ -137,6 +141,8 @@ def detect_privilege_escalation(events: list[LogEvent]) -> list[Anomaly]:
             anomaly_id=f"PE-{seq:03d}",
             severity=severity,
             category="privilege_escalation",
+            mitre_id="T1548",
+            mitre_name="Abuse Elevation Control Mechanism",
             title=f"Repeated sudo failures by {user}",
             description=f"User '{user}' failed sudo authentication {len(evs)} time(s).",
             username=user,
@@ -153,6 +159,8 @@ def detect_privilege_escalation(events: list[LogEvent]) -> list[Anomaly]:
             anomaly_id=f"PE-{seq:03d}",
             severity="HIGH",
             category="privilege_escalation",
+            mitre_id="T1548",
+            mitre_name="Abuse Elevation Control Mechanism",
             title="su to root detected",
             description=f"Session opened as root {len(su_roots)} time(s) via su.",
             username="root",
@@ -170,6 +178,8 @@ def detect_privilege_escalation(events: list[LogEvent]) -> list[Anomaly]:
             anomaly_id=f"PE-{seq:03d}",
             severity="HIGH",
             category="privilege_escalation",
+            mitre_id="T1136",
+            mitre_name="Create Account",
             title=f"New user account(s) created",
             description=f"useradd was called {len(user_creates)} time(s). Users: {', '.join(usernames)}.",
             count=len(user_creates),
@@ -186,6 +196,8 @@ def detect_privilege_escalation(events: list[LogEvent]) -> list[Anomaly]:
             anomaly_id=f"PE-{seq:03d}",
             severity="CRITICAL",
             category="privilege_escalation",
+            mitre_id="T1078",
+            mitre_name="Valid Accounts",
             title="Direct root login detected",
             description=f"Root logins from IPs: {', '.join(ips)}. Count: {len(root_logins)}.",
             source_ip=", ".join(ips) or None,
@@ -234,6 +246,8 @@ def detect_unusual_ips(events: list[LogEvent]) -> list[Anomaly]:
                 anomaly_id=f"IP-{seq:03d}",
                 severity="CRITICAL",
                 category="unusual_ip",
+                mitre_id="T1110",
+                mitre_name="Brute Force",
                 title=f"Successful login after {len(failures_before)} failures from {ip}",
                 description=(
                     f"IP {ip} had {len(failures_before)} failed attempts before "
@@ -257,6 +271,8 @@ def detect_unusual_ips(events: list[LogEvent]) -> list[Anomaly]:
             anomaly_id=f"IP-{seq:03d}",
             severity="HIGH",
             category="unusual_ip",
+            mitre_id="T1110",
+            mitre_name="Brute Force",
             title=f"Distributed brute force from {len(all_failure_ips)} IPs",
             description=(
                 f"{total_distributed} total failed attempts spread across "
@@ -271,16 +287,30 @@ def detect_unusual_ips(events: list[LogEvent]) -> list[Anomaly]:
     return anomalies
 
 
-def run_detection(events: list[LogEvent]) -> list[Anomaly]:
-    """
-    Run all detection rules and return deduplicated anomaly list sorted by severity.
+def run_detection(
+    events: list[LogEvent],
+    allowlist_ips: set[str] | None = None,
+    allowlist_users: set[str] | None = None,
+) -> list[Anomaly]:
+    """Run all detection rules and return deduplicated anomaly list sorted by severity.
+
+    Events from allowlisted IPs or users are silently skipped so trusted
+    hosts (jump boxes, monitoring agents) don't generate noise.
     """
     severity_order = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3, "INFO": 4}
 
+    filtered = events
+    if allowlist_ips or allowlist_users:
+        filtered = [
+            e for e in events
+            if (not allowlist_ips or e.source_ip not in allowlist_ips)
+            and (not allowlist_users or e.username not in allowlist_users)
+        ]
+
     all_anomalies = (
-        detect_brute_force(events)
-        + detect_privilege_escalation(events)
-        + detect_unusual_ips(events)
+        detect_brute_force(filtered)
+        + detect_privilege_escalation(filtered)
+        + detect_unusual_ips(filtered)
     )
 
     all_anomalies.sort(key=lambda a: severity_order.get(a.severity, 99))
