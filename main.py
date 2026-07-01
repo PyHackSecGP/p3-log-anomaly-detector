@@ -113,6 +113,11 @@ def parse_args() -> argparse.Namespace:
         help="Send email alert on CRITICAL/HIGH findings (configure via ALERT_SMTP_* env vars)",
     )
     parser.add_argument(
+        "--verbose", "-v",
+        action="store_true",
+        help="Enable verbose output (e.g. detailed AbuseIPDB lookup results)",
+    )
+    parser.add_argument(
         "--no-color",
         action="store_true",
         help="Disable ANSI color codes in output",
