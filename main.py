@@ -8,7 +8,7 @@ Examples:
   python main.py /var/log/auth.log
   python main.py /var/log/auth.log --model llama3.2:3b --json report.json
   python main.py sample_auth.log --no-ai
-  python main.py /var/log/auth.log --url http://100.126.22.55:11434
+  python main.py /var/log/auth.log --url http://localhost:11434
 """
 
 import argparse

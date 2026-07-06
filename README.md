@@ -26,8 +26,8 @@ python main.py sample_auth.log --no-ai
 # Run against your system logs with AI
 sudo python main.py /var/log/auth.log --url http://localhost:11434 --model llama3.2:3b
 
-# Use claw-core endpoint
-python main.py /var/log/auth.log --url http://100.126.22.55:11434 --model llama3.1:70b
+# Use a remote Ollama endpoint (or set OLLAMA_HOST env var)
+python main.py /var/log/auth.log --url "$OLLAMA_HOST" --model llama3.1:70b
 
 # Save reports
 python main.py /var/log/auth.log --out report.txt --json report.json
