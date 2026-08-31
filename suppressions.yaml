@@ -1,0 +1,9 @@
+# P3 suppressions — reviewed 2026-08-30
+# All urllib findings are false positives: URLs come from config constants
+# (OLLAMA_HOST env var, hardcoded AbuseIPDB endpoint), never from user input.
+
+- rule_id: B310
+  reason: "urllib used only with internal config URLs — not user-controlled input"
+
+- rule_id: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected
+  reason: "URLs from config constants/env vars, not user-controlled"
