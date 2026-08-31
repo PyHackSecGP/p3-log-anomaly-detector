@@ -1,0 +1,25 @@
+[Unit]
+Description=P3 AI Log Anomaly Detector — watch mode
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/p3-log-anomaly-detector
+ExecStart=/usr/bin/python3 /opt/p3-log-anomaly-detector/main.py \
+    /var/log/auth.log \
+    --watch \
+    --interval 60 \
+    --no-ai \
+    --allowlist /opt/p3-log-anomaly-detector/allowlist.yaml
+Restart=on-failure
+RestartSec=10
+
+# Set these in /etc/systemd/system/p3-anomaly-detector.service.d/override.conf
+# or via: systemctl edit p3-anomaly-detector
+# Environment=ALERT_WEBHOOK_URL=https://hooks.slack.com/services/...
+# Environment=OLLAMA_HOST=http://YOUR_OLLAMA_IP:11434
+# Environment=ABUSEIPDB_API_KEY=your_key_here
+
+[Install]
+WantedBy=multi-user.target

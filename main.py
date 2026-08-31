@@ -21,6 +21,7 @@ from abuseipdb import enrich_anomalies
 from allowlist import load_allowlist
 from anomaly_detector import run_detection
 from email_alerts import send_alert
+from slack_alerts import send_webhook
 from journalctl_parser import parse_journalctl_file
 from log_parser import parse_file
 from ollama_client import OllamaClient, DEFAULT_BASE_URL, DEFAULT_MODEL
@@ -113,6 +114,24 @@ def parse_args() -> argparse.Namespace:
         help="Send email alert on CRITICAL/HIGH findings (configure via ALERT_SMTP_* env vars)",
     )
     parser.add_argument(
+        "--webhook",
+        metavar="URL",
+        default=None,
+        help="Slack or Discord webhook URL for alerts (or set ALERT_WEBHOOK_URL env var)",
+    )
+    parser.add_argument(
+        "--watch",
+        action="store_true",
+        help="Watch mode: tail log file and re-scan every --interval seconds",
+    )
+    parser.add_argument(
+        "--interval",
+        type=int,
+        default=60,
+        metavar="SECS",
+        help="Scan interval in watch mode (default: 60s)",
+    )
+    parser.add_argument(
         "--verbose", "-v",
         action="store_true",
         help="Enable verbose output (e.g. detailed AbuseIPDB lookup results)",
@@ -175,9 +194,10 @@ def generate_sample_log(output_path: str = "sample_auth.log") -> None:
     print(f"Sample log written to: {output_path}")
 
 
-def main() -> int:
+def main(args=None) -> int:
     """Main entry point. Returns exit code."""
-    args = parse_args()
+    if args is None:
+        args = parse_args()
     colored = not args.no_color and sys.stdout.isatty()
 
     # --generate-sample mode
@@ -338,6 +358,16 @@ def main() -> int:
         else:
             print("No CRITICAL/HIGH anomalies — email skipped.")
 
+    # Webhook alert (Slack / Discord)
+    webhook_url = args.webhook or os.environ.get("ALERT_WEBHOOK_URL", "")
+    if webhook_url:
+        alert_worthy = [a for a in anomalies if a.severity in ("CRITICAL", "HIGH")]
+        if alert_worthy:
+            print("Sending webhook alert ...", flush=True)
+            send_webhook(alert_worthy, log_path, ai_assessment, webhook_url=webhook_url, verbose=True)
+        else:
+            print("No CRITICAL/HIGH anomalies — webhook skipped.")
+
     # Exit code reflects highest severity
     if any(a.severity == "CRITICAL" for a in anomalies):
         return 2
@@ -346,5 +376,72 @@ def main() -> int:
     return 0
 
 
+def _watch_mode(args: "argparse.Namespace") -> None:
+    """Tail log file and re-scan every --interval seconds."""
+    import time
+
+    log_path = args.log_file
+    if not log_path or not Path(log_path).is_file():
+        print(f"ERROR: --watch requires a valid log file. Got: {log_path}", file=sys.stderr)
+        sys.exit(1)
+
+    print(f"Watch mode: scanning {log_path} every {args.interval}s. Ctrl+C to stop.")
+    seen_anomaly_ids: set[str] = set()
+
+    while True:
+        try:
+            fmt = args.format
+            if fmt == "auto":
+                with open(log_path, "r", errors="replace") as fh:
+                    for line in fh:
+                        stripped = line.strip()
+                        if stripped:
+                            fmt = "journalctl" if stripped.startswith("{") else "auth"
+                            break
+                    else:
+                        fmt = "auth"
+
+            events = parse_journalctl_file(log_path) if fmt == "journalctl" else parse_file(log_path)
+
+            allowlist_ips: set[str] = set()
+            allowlist_users: set[str] = set()
+            if args.allowlist:
+                try:
+                    allowlist_ips, allowlist_users = load_allowlist(args.allowlist)
+                except Exception:
+                    pass
+
+            anomalies = run_detection(events, allowlist_ips=allowlist_ips or None, allowlist_users=allowlist_users or None)
+
+            # Only alert on anomalies not seen in previous scans
+            new_anomalies = [a for a in anomalies if a.anomaly_id not in seen_anomaly_ids]
+            for a in new_anomalies:
+                seen_anomaly_ids.add(a.anomaly_id)
+
+            alert_worthy = [a for a in new_anomalies if a.severity in ("CRITICAL", "HIGH")]
+            if alert_worthy:
+                print(f"[{time.strftime('%H:%M:%S')}] {len(alert_worthy)} new HIGH/CRITICAL anomaly(ies)")
+                webhook_url = args.webhook or os.environ.get("ALERT_WEBHOOK_URL", "")
+                if webhook_url:
+                    send_webhook(alert_worthy, log_path, webhook_url=webhook_url, verbose=True)
+                if args.email:
+                    send_alert(alert_worthy, log_path, verbose=True)
+            else:
+                print(f"[{time.strftime('%H:%M:%S')}] {len(anomalies)} anomaly(ies) — no new HIGH/CRITICAL")
+
+            time.sleep(args.interval)
+
+        except KeyboardInterrupt:
+            print("\nWatch mode stopped.")
+            break
+        except Exception as exc:
+            print(f"[watch] Error: {exc}", file=sys.stderr)
+            time.sleep(args.interval)
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    _args = parse_args()
+    if _args.watch:
+        _watch_mode(_args)
+    else:
+        sys.exit(main(_args))
