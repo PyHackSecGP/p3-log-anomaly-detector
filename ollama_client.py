@@ -6,6 +6,7 @@ Sends structured anomaly summaries and receives threat assessments.
 import json
 import logging
 import urllib.error
+import urllib.parse
 import urllib.request
 from typing import Optional
 
@@ -24,9 +25,12 @@ class OllamaClient:
         Initialize client.
 
         Args:
-            base_url: Ollama server URL.
+            base_url: Ollama server URL (must be http:// or https://).
             model: Model name to use for generation.
         """
+        parsed = urllib.parse.urlparse(base_url)
+        if parsed.scheme not in ("http", "https"):
+            raise ValueError(f"Unsupported URL scheme {parsed.scheme!r} — use http:// or https://")
         self.base_url = base_url.rstrip("/")
         self.model = model
 
@@ -46,7 +50,7 @@ class OllamaClient:
             method="POST",
         )
         try:
-            with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT) as resp:
+            with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT) as resp:  # nosec B310 — scheme validated in __init__
                 body = resp.read().decode("utf-8")
                 return json.loads(body)
         except urllib.error.URLError as exc:
@@ -56,7 +60,7 @@ class OllamaClient:
         """Return True if the Ollama server is reachable."""
         try:
             req = urllib.request.Request(f"{self.base_url}/api/tags", method="GET")
-            with urllib.request.urlopen(req, timeout=5):
+            with urllib.request.urlopen(req, timeout=5):  # nosec B310 — scheme validated in __init__
                 return True
         except Exception:
             return False
@@ -65,7 +69,7 @@ class OllamaClient:
         """Return list of available model names on the server."""
         try:
             req = urllib.request.Request(f"{self.base_url}/api/tags", method="GET")
-            with urllib.request.urlopen(req, timeout=10) as resp:
+            with urllib.request.urlopen(req, timeout=10) as resp:  # nosec B310 — scheme validated in __init__
                 data = json.loads(resp.read().decode("utf-8"))
                 return [m["name"] for m in data.get("models", [])]
         except Exception:

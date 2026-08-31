@@ -30,7 +30,7 @@ def check_ip(ip: str, api_key: str) -> dict:
         },
     )
     try:
-        with urllib.request.urlopen(req, timeout=_TIMEOUT) as resp:
+        with urllib.request.urlopen(req, timeout=_TIMEOUT) as resp:  # nosec B310 — constant HTTPS URL
             return json.loads(resp.read()).get("data", {})
     except (urllib.error.URLError, json.JSONDecodeError):
         return {}
