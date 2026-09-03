@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Optional
 
 from anomaly_detector import Anomaly
-from log_parser import LogEvent
+from parsers.base import LogEvent
 
 
 SEVERITY_COLORS = {

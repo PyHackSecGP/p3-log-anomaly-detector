@@ -1,13 +1,16 @@
 """
 Agentic log analysis loop.
 
-LogAnalysisAgent drives a multi-step investigation using tool calls guided by
-a local Ollama LLM. Each step the model picks one tool from a defined set;
-the agent executes it and feeds results back until the model calls 'conclude'
-or the step limit is reached.
+LogAnalysisAgent drives a multi-step investigation using real multi-turn
+conversation via Ollama /api/chat. Each turn the model returns one JSON
+tool call; the agent executes it and feeds results back as the next user
+message. This is genuine tool-use — not prompt concatenation.
 
-Tool-calling works by prompting the model to emit a single JSON object per turn.
-This approach is model-agnostic and works reliably with hermes3, qwen3.5, llama3.
+Supported tools: search_ip, search_user, get_timeline,
+check_lateral_movement, get_anomaly_context, conclude.
+
+Optional --act mode executes remediation actions (block_ip, lock_user)
+via actions.py when the agent's conclusion includes HIGH/CRITICAL findings.
 """
 
 from __future__ import annotations
@@ -18,12 +21,48 @@ from datetime import datetime, timedelta
 from typing import Any, Optional
 
 from anomaly_detector import Anomaly
-from log_parser import LogEvent
+from parsers.base import LogEvent
 from ollama_client import OllamaClient
-
 
 MAX_STEPS = 6
 _MAX_EVENTS_PER_RESULT = 20
+
+_SYSTEM_PROMPT = """\
+You are an expert Linux security analyst performing an autonomous log investigation.
+You will be shown security anomalies detected in auth or web logs.
+Investigate findings using the tools below, then deliver a final threat assessment.
+
+Available tools — respond with exactly ONE JSON object per turn, no prose before or after:
+
+{"action": "search_ip", "args": {"ip": "<ip>"}}
+  → All log events from this source IP.
+
+{"action": "search_user", "args": {"username": "<user>"}}
+  → All log events associated with this username.
+
+{"action": "get_timeline", "args": {"anchor": "<ISO-datetime>", "before_min": <int>, "after_min": <int>}}
+  → Events in a time window around the anchor timestamp.
+
+{"action": "check_lateral_movement", "args": {"username": "<user>"}}
+  → Unique source IPs a user authenticated from; flags multi-IP logins.
+
+{"action": "get_anomaly_context", "args": {"anomaly_id": "<id>"}}
+  → Raw log lines stored for an anomaly (e.g. "BF-001").
+
+{"action": "conclude", "args": {
+    "risk_level": "<CRITICAL|HIGH|MEDIUM|LOW>",
+    "summary": "<narrative>",
+    "iocs": ["<ip-or-user>", ...],
+    "recommendations": ["<action>", ...]
+}}
+  → Finish investigation with final threat assessment.
+
+Rules:
+- ONE JSON object only. No text before or after the JSON.
+- Investigate HIGH/CRITICAL findings first.
+- After 5 tool calls you MUST call conclude.
+- Do not repeat identical tool calls.
+"""
 
 
 @dataclass
@@ -43,35 +82,8 @@ class AgentReport:
     iocs: list[str] = field(default_factory=list)
     recommendations: list[str] = field(default_factory=list)
     steps: list[AgentStep] = field(default_factory=list)
+    actions_taken: list[str] = field(default_factory=list)
     raw_conclusion: str = ""
-
-
-_TOOL_SCHEMA = """\
-Available tools — respond with exactly ONE JSON object per turn, no prose:
-
-{"action": "search_ip", "args": {"ip": "<ip>"}}
-  → All events from a specific source IP.
-
-{"action": "search_user", "args": {"username": "<user>"}}
-  → All events associated with a username.
-
-{"action": "get_timeline", "args": {"anchor": "<ISO-datetime>", "before_min": <int>, "after_min": <int>}}
-  → Events in a time window around the anchor timestamp.
-
-{"action": "check_lateral_movement", "args": {"username": "<user>"}}
-  → Unique source IPs a user authenticated from; flags multi-IP logins.
-
-{"action": "get_anomaly_context", "args": {"anomaly_id": "<id>"}}
-  → Raw log lines for an anomaly ID (e.g. "BF-001").
-
-{"action": "conclude", "args": {"risk_level": "<CRITICAL|HIGH|MEDIUM|LOW>", "summary": "<text>", "iocs": ["<ip>", ...], "recommendations": ["<action>", ...]}}
-  → Finish investigation with final threat assessment.
-
-Rules:
-- ONE JSON object only. No text before or after the JSON.
-- After 5 tool calls you MUST call conclude.
-- Do not repeat identical tool calls.
-"""
 
 
 def _extract_json(text: str) -> Optional[dict]:
@@ -89,13 +101,12 @@ def _extract_json(text: str) -> Optional[dict]:
 
 
 def _fmt_events(events: list[LogEvent], limit: int = _MAX_EVENTS_PER_RESULT) -> str:
-    """Format LogEvents as compact text for LLM context."""
     lines = []
     for ev in events[:limit]:
         ts = ev.timestamp.isoformat() if ev.timestamp else "??:??:??"
         lines.append(
-            f"  [{ts}] {ev.event_type or '?'} | user={ev.username or '-'}"
-            f" | ip={ev.source_ip or '-'} | {ev.message[:80]}"
+            f"  [{ts}] {ev.event_type or ev.extra.get('method','?')} "
+            f"| user={ev.user or '-'} | ip={ev.ip or '-'} | {ev.message[:80]}"
         )
     if len(events) > limit:
         lines.append(f"  ... ({len(events) - limit} more events)")
@@ -104,21 +115,25 @@ def _fmt_events(events: list[LogEvent], limit: int = _MAX_EVENTS_PER_RESULT) -> 
 
 class LogAnalysisAgent:
     """
-    Multi-step agentic log analyst.
+    Multi-step agentic log analyst using real /api/chat multi-turn conversation.
 
     Investigation loop:
-      1. Build prompt with anomaly context + tool schema
-      2. Ask LLM which tool to call next
-      3. Execute the tool, feed results back
+      1. Send anomaly context + system prompt to /api/chat
+      2. Model returns ONE JSON tool call
+      3. Agent executes the tool, appends result as next user message
       4. Repeat until model calls 'conclude' or MAX_STEPS reached
+      5. Optionally execute remediation actions via actions.py
     """
 
-    def __init__(self, client: OllamaClient) -> None:
+    def __init__(self, client: OllamaClient, act: bool = False) -> None:
         """
         Args:
-            client: Configured OllamaClient pointing to a running Ollama server.
+            client: Configured OllamaClient.
+            act: If True, execute remediation actions (block IPs, lock users)
+                 when conclusion is HIGH or CRITICAL.
         """
         self.client = client
+        self.act = act
         self.steps: list[AgentStep] = []
         self._called_tools: set[str] = set()
 
@@ -131,24 +146,27 @@ class LogAnalysisAgent:
             anomalies: Rule-based findings with MITRE IDs and confidence scores.
 
         Returns:
-            AgentReport with risk level, IOCs, recommendations, and full reasoning trace.
+            AgentReport with risk level, IOCs, recommendations, trace, and
+            any remediation actions taken.
         """
         self.steps = []
         self._called_tools = set()
 
-        conversation: list[dict] = [
-            {"role": "system", "content": self._system_prompt()},
+        # Real multi-turn conversation — messages list passed to /api/chat
+        messages: list[dict] = [
+            {"role": "system", "content": _SYSTEM_PROMPT},
             {"role": "user", "content": self._initial_context(anomalies)},
         ]
 
         for step_num in range(1, MAX_STEPS + 1):
-            response = self._call_llm(conversation)
+            response = self._call_llm(messages)
             parsed = _extract_json(response)
 
-            conversation.append({"role": "assistant", "content": response})
+            # Append model response to conversation history
+            messages.append({"role": "assistant", "content": response})
 
             if not parsed or "action" not in parsed:
-                conversation.append({
+                messages.append({
                     "role": "user",
                     "content": "Respond with ONLY a single JSON tool call. No prose.",
                 })
@@ -158,7 +176,7 @@ class LogAnalysisAgent:
             args = parsed.get("args", {})
 
             if action == "conclude":
-                return AgentReport(
+                report = AgentReport(
                     risk_level=args.get("risk_level", "UNKNOWN"),
                     summary=args.get("summary", ""),
                     iocs=args.get("iocs", []),
@@ -166,6 +184,9 @@ class LogAnalysisAgent:
                     steps=self.steps,
                     raw_conclusion=response,
                 )
+                if self.act:
+                    report.actions_taken = self._execute_actions(report)
+                return report
 
             result = self._execute_tool(action, args, events, anomalies)
             self.steps.append(AgentStep(
@@ -174,21 +195,14 @@ class LogAnalysisAgent:
                 args=args,
                 result_summary=result[:300],
             ))
-            conversation.append({"role": "user", "content": f"Tool result:\n{result}"})
+            # Feed tool result back as the next user message
+            messages.append({"role": "user", "content": f"Tool result:\n{result}"})
 
-        return self._force_conclude(conversation)
+        return self._force_conclude(messages)
 
     # ------------------------------------------------------------------
     # Prompt builders
     # ------------------------------------------------------------------
-
-    def _system_prompt(self) -> str:
-        return (
-            "You are an expert Linux security analyst performing an autonomous log "
-            "investigation. You will be shown security anomalies detected in auth "
-            "logs. Investigate using the provided tools, then deliver a final threat "
-            "assessment.\n\n" + _TOOL_SCHEMA
-        )
 
     def _initial_context(self, anomalies: list[Anomaly]) -> str:
         lines = [f"## Detected Anomalies ({len(anomalies)} total)\n"]
@@ -204,24 +218,16 @@ class LogAnalysisAgent:
             )
         if len(anomalies) > 10:
             lines.append(f"... and {len(anomalies) - 10} more.\n")
-        lines.append(
-            "Investigate the highest-severity findings first. "
-            "Use tools to gather evidence, then conclude."
-        )
+        lines.append("Investigate the highest-severity findings first. Use tools, then conclude.")
         return "\n".join(lines)
 
     # ------------------------------------------------------------------
-    # LLM call
+    # LLM call — uses /api/chat for genuine multi-turn
     # ------------------------------------------------------------------
 
-    def _call_llm(self, conversation: list[dict]) -> str:
-        """Flatten conversation history into a single Ollama prompt."""
-        parts = []
-        for msg in conversation:
-            parts.append(f"[{msg['role'].upper()}]\n{msg['content']}")
-        prompt = "\n\n".join(parts) + "\n\n[ASSISTANT]"
+    def _call_llm(self, messages: list[dict]) -> str:
         try:
-            return self.client.generate(prompt)
+            return self.client.chat(messages)
         except RuntimeError:
             return (
                 '{"action": "conclude", "args": {'
@@ -240,7 +246,6 @@ class LogAnalysisAgent:
         events: list[LogEvent],
         anomalies: list[Anomaly],
     ) -> str:
-        """Dispatch a tool call and return its result as a string."""
         call_key = f"{action}:{json.dumps(args, sort_keys=True)}"
         if call_key in self._called_tools:
             return "(duplicate tool call — skipped)"
@@ -248,12 +253,12 @@ class LogAnalysisAgent:
 
         if action == "search_ip":
             ip = args.get("ip", "")
-            found = [e for e in events if e.source_ip == ip]
+            found = [e for e in events if e.ip == ip]
             return f"Events from IP {ip} ({len(found)} total):\n{_fmt_events(found)}"
 
         if action == "search_user":
             user = args.get("username", "")
-            found = [e for e in events if e.username == user]
+            found = [e for e in events if e.user == user]
             return f"Events for user '{user}' ({len(found)} total):\n{_fmt_events(found)}"
 
         if action == "get_timeline":
@@ -264,10 +269,7 @@ class LogAnalysisAgent:
                 anchor = datetime.fromisoformat(anchor_str)
                 start = anchor - timedelta(minutes=before)
                 end = anchor + timedelta(minutes=after)
-                found = [
-                    e for e in events
-                    if e.timestamp and start <= e.timestamp <= end
-                ]
+                found = [e for e in events if e.timestamp and start <= e.timestamp <= end]
                 return (
                     f"Timeline [{anchor_str} -{before}/+{after}min] ({len(found)} events):\n"
                     + _fmt_events(found)
@@ -277,19 +279,19 @@ class LogAnalysisAgent:
 
         if action == "check_lateral_movement":
             user = args.get("username", "")
-            all_ips = {e.source_ip for e in events if e.username == user and e.source_ip}
+            all_ips = {e.ip for e in events if e.user == user and e.ip}
             success_ips = {
-                e.source_ip for e in events
-                if e.username == user
+                e.ip for e in events
+                if e.user == user
                 and e.event_type in ("ssh_accepted_password", "ssh_accepted_publickey")
-                and e.source_ip
+                and e.ip
             }
             lateral = len(success_ips) > 1
             return (
                 f"User '{user}': {len(all_ips)} unique IP(s) total.\n"
-                f"  All IPs seen: {', '.join(sorted(all_ips)) or 'none'}\n"
+                f"  All IPs: {', '.join(sorted(all_ips)) or 'none'}\n"
                 f"  Successful login IPs: {', '.join(sorted(success_ips)) or 'none'}\n"
-                f"  {'⚠ LATERAL MOVEMENT INDICATOR — multiple successful-login IPs.' if lateral else 'Single successful-login IP — no lateral movement detected.'}"
+                f"  {'LATERAL MOVEMENT INDICATOR — multiple successful-login source IPs.' if lateral else 'Single successful-login IP.'}"
             )
 
         if action == "get_anomaly_context":
@@ -307,21 +309,20 @@ class LogAnalysisAgent:
 
         return f"Unknown tool: {action!r}"
 
-    def _force_conclude(self, conversation: list[dict]) -> AgentReport:
-        """Force a conclusion when MAX_STEPS is reached."""
-        conversation.append({
+    def _force_conclude(self, messages: list[dict]) -> AgentReport:
+        messages.append({
             "role": "user",
             "content": (
-                "Step limit reached. You MUST call conclude NOW.\n"
+                "Step limit reached. Call conclude NOW with your assessment:\n"
                 '{"action": "conclude", "args": {"risk_level": "...", '
                 '"summary": "...", "iocs": [], "recommendations": []}}'
             ),
         })
-        response = self._call_llm(conversation)
+        response = self._call_llm(messages)
         parsed = _extract_json(response)
         if parsed and parsed.get("action") == "conclude":
             args = parsed.get("args", {})
-            return AgentReport(
+            report = AgentReport(
                 risk_level=args.get("risk_level", "UNKNOWN"),
                 summary=args.get("summary", response),
                 iocs=args.get("iocs", []),
@@ -329,8 +330,36 @@ class LogAnalysisAgent:
                 steps=self.steps,
                 raw_conclusion=response,
             )
+            if self.act:
+                report.actions_taken = self._execute_actions(report)
+            return report
         return AgentReport(
             risk_level="UNKNOWN",
             summary=response or "Agent did not produce a conclusion.",
             steps=self.steps,
         )
+
+    # ------------------------------------------------------------------
+    # Remediation actions (--act mode)
+    # ------------------------------------------------------------------
+
+    def _execute_actions(self, report: AgentReport) -> list[str]:
+        """Execute remediation actions when risk is HIGH or CRITICAL."""
+        if report.risk_level not in ("CRITICAL", "HIGH"):
+            return []
+
+        try:
+            from actions import block_ip, lock_user
+        except ImportError:
+            return ["actions.py not found — remediation skipped"]
+
+        taken: list[str] = []
+        for ioc in report.iocs:
+            # IPs look like digits and dots
+            if all(c.isdigit() or c == "." for c in ioc) and ioc.count(".") == 3:
+                result = block_ip(ioc)
+                taken.append(result)
+            else:
+                result = lock_user(ioc)
+                taken.append(result)
+        return taken

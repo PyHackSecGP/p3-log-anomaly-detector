@@ -20,10 +20,14 @@ import os
 from abuseipdb import enrich_anomalies
 from allowlist import load_allowlist
 from anomaly_detector import run_detection
+from baseline import Baseline
 from email_alerts import send_alert
+from nginx_detector import run_nginx_detection
+from parsers.auth_parser import AuthParser
+from parsers.journalctl_parser import JournalctlParser
+from parsers.nginx_parser import NginxParser
 from slack_alerts import send_webhook
-from journalctl_parser import parse_journalctl_file
-from log_parser import parse_file
+from state import WatchState
 from ollama_client import OllamaClient, DEFAULT_BASE_URL, DEFAULT_MODEL
 from agent import LogAnalysisAgent
 from report_generator import (
@@ -84,6 +88,11 @@ def parse_args() -> argparse.Namespace:
         "--agentic",
         action="store_true",
         help="Agentic mode: LLM drives a multi-step investigation loop (tool calls, correlation, final report)",
+    )
+    parser.add_argument(
+        "--act",
+        action="store_true",
+        help="Action mode (requires --agentic + root): execute remediation — block IPs via iptables, lock compromised accounts",
     )
     parser.add_argument(
         "--json",
@@ -243,25 +252,33 @@ def main(args=None) -> int:
     # Detect format
     fmt = args.format
     if fmt == "auto":
-        # Peek at first non-empty line to detect journalctl JSON
         try:
             with open(log_path, "r", errors="replace") as fh:
                 for line in fh:
                     stripped = line.strip()
                     if stripped:
-                        fmt = "journalctl" if stripped.startswith("{") else "auth"
+                        if stripped.startswith("{"):
+                            fmt = "journalctl"
+                        elif stripped.split()[0] in ("GET", "POST", "PUT", "DELETE", "PATCH", "HEAD") or (
+                            len(stripped) > 10 and stripped[0].isdigit() and " - " in stripped
+                        ):
+                            fmt = "nginx"
+                        else:
+                            fmt = "auth"
                         break
                 else:
                     fmt = "auth"
         except OSError:
             fmt = "auth"
 
-    # Parse
+    # Parse using unified parsers
     print(f"Parsing {log_path} (format: {fmt}) ...", flush=True)
     if fmt == "journalctl":
-        events = parse_journalctl_file(log_path)
+        events = JournalctlParser().parse_file(log_path)
+    elif fmt == "nginx":
+        events = NginxParser().parse_file(log_path)
     else:
-        events = parse_file(log_path)
+        events = AuthParser().parse_file(log_path)
     print(f"  {len(events):,} events parsed.", flush=True)
 
     if not events:
@@ -284,7 +301,17 @@ def main(args=None) -> int:
 
     # Detect anomalies
     print("Running anomaly detection ...", flush=True)
-    anomalies = run_detection(events, allowlist_ips=allowlist_ips or None, allowlist_users=allowlist_users or None)
+    baseline = Baseline()
+    baseline.record(events)
+    if fmt == "nginx":
+        anomalies = run_nginx_detection(events, allowlist_ips=allowlist_ips or None)
+    else:
+        anomalies = run_detection(
+            events,
+            allowlist_ips=allowlist_ips or None,
+            allowlist_users=allowlist_users or None,
+            baseline=baseline,
+        )
     print(f"  {len(anomalies)} anomalies found.", flush=True)
 
     # AbuseIPDB enrichment
@@ -323,7 +350,7 @@ def main(args=None) -> int:
                         flush=True,
                     )
                     try:
-                        agent = LogAnalysisAgent(client)
+                        agent = LogAnalysisAgent(client, act=args.act)
                         agent_report = agent.analyze(events, anomalies)
                         print(
                             f"  Agent completed in {len(agent_report.steps)} step(s). "
@@ -402,8 +429,49 @@ def main(args=None) -> int:
     return 0
 
 
+def _detect_fmt(log_path: str) -> str:
+    """Peek at first non-empty line to detect log format."""
+    try:
+        with open(log_path, "r", errors="replace") as fh:
+            for line in fh:
+                stripped = line.strip()
+                if stripped:
+                    if stripped.startswith("{"):
+                        return "journalctl"
+                    if stripped[0].isdigit() and " - " in stripped:
+                        return "nginx"
+                    return "auth"
+    except OSError:
+        pass
+    return "auth"
+
+
+def _parse_lines(lines: list[str], fmt: str) -> list:
+    """Parse a list of raw log lines using the appropriate parser."""
+    text = "".join(lines)
+    import io
+    if fmt == "journalctl":
+        parser = JournalctlParser()
+    elif fmt == "nginx":
+        parser = NginxParser()
+    else:
+        parser = AuthParser()
+    events = []
+    for line in lines:
+        ev = parser.parse_line(line)
+        if ev:
+            events.append(ev)
+    return events
+
+
 def _watch_mode(args: "argparse.Namespace") -> None:
-    """Tail log file and re-scan every --interval seconds."""
+    """
+    Tail-based watch mode: reads only NEW bytes since last scan.
+
+    Uses WatchState (SQLite) to persist:
+    - File position + inode (survives restarts, handles log rotation)
+    - Seen anomaly IDs (no duplicate alerts across daemon restarts)
+    """
     import time
 
     log_path = args.log_file
@@ -411,49 +479,59 @@ def _watch_mode(args: "argparse.Namespace") -> None:
         print(f"ERROR: --watch requires a valid log file. Got: {log_path}", file=sys.stderr)
         sys.exit(1)
 
-    print(f"Watch mode: scanning {log_path} every {args.interval}s. Ctrl+C to stop.")
-    seen_anomaly_ids: set[str] = set()
+    fmt = args.format if args.format != "auto" else _detect_fmt(log_path)
+    state = WatchState()
+    baseline = Baseline()
+
+    allowlist_ips: set[str] = set()
+    allowlist_users: set[str] = set()
+    if args.allowlist:
+        try:
+            allowlist_ips, allowlist_users = load_allowlist(args.allowlist)
+        except Exception:
+            pass
+
+    print(f"Watch mode: tailing {log_path} (format: {fmt}) every {args.interval}s. Ctrl+C to stop.")
 
     while True:
         try:
-            fmt = args.format
-            if fmt == "auto":
-                with open(log_path, "r", errors="replace") as fh:
-                    for line in fh:
-                        stripped = line.strip()
-                        if stripped:
-                            fmt = "journalctl" if stripped.startswith("{") else "auth"
-                            break
+            # Read only new bytes since last scan
+            new_lines = state.read_new_lines(log_path)
+
+            if new_lines:
+                events = _parse_lines(new_lines, fmt)
+                if events:
+                    baseline.record(events)
+                    if fmt == "nginx":
+                        anomalies = run_nginx_detection(events, allowlist_ips=allowlist_ips or None)
                     else:
-                        fmt = "auth"
+                        anomalies = run_detection(
+                            events,
+                            allowlist_ips=allowlist_ips or None,
+                            allowlist_users=allowlist_users or None,
+                            baseline=baseline,
+                        )
 
-            events = parse_journalctl_file(log_path) if fmt == "journalctl" else parse_file(log_path)
+                    new_anomalies = [
+                        a for a in anomalies if not state.is_seen(a.anomaly_id, log_path)
+                    ]
+                    for a in new_anomalies:
+                        state.mark_seen(a.anomaly_id, log_path)
 
-            allowlist_ips: set[str] = set()
-            allowlist_users: set[str] = set()
-            if args.allowlist:
-                try:
-                    allowlist_ips, allowlist_users = load_allowlist(args.allowlist)
-                except Exception:
-                    pass
-
-            anomalies = run_detection(events, allowlist_ips=allowlist_ips or None, allowlist_users=allowlist_users or None)
-
-            # Only alert on anomalies not seen in previous scans
-            new_anomalies = [a for a in anomalies if a.anomaly_id not in seen_anomaly_ids]
-            for a in new_anomalies:
-                seen_anomaly_ids.add(a.anomaly_id)
-
-            alert_worthy = [a for a in new_anomalies if a.severity in ("CRITICAL", "HIGH")]
-            if alert_worthy:
-                print(f"[{time.strftime('%H:%M:%S')}] {len(alert_worthy)} new HIGH/CRITICAL anomaly(ies)")
-                webhook_url = args.webhook or os.environ.get("ALERT_WEBHOOK_URL", "")
-                if webhook_url:
-                    send_webhook(alert_worthy, log_path, webhook_url=webhook_url, verbose=True)
-                if args.email:
-                    send_alert(alert_worthy, log_path, verbose=True)
+                    alert_worthy = [a for a in new_anomalies if a.severity in ("CRITICAL", "HIGH")]
+                    if alert_worthy:
+                        print(f"[{time.strftime('%H:%M:%S')}] {len(alert_worthy)} new HIGH/CRITICAL anomaly(ies)")
+                        webhook_url = args.webhook or os.environ.get("ALERT_WEBHOOK_URL", "")
+                        if webhook_url:
+                            send_webhook(alert_worthy, log_path, webhook_url=webhook_url, verbose=True)
+                        if args.email:
+                            send_alert(alert_worthy, log_path, verbose=True)
+                    elif anomalies:
+                        print(f"[{time.strftime('%H:%M:%S')}] {len(events)} new events, {len(anomalies)} anomaly(ies) — no new HIGH/CRITICAL")
+                else:
+                    print(f"[{time.strftime('%H:%M:%S')}] {len(new_lines)} new lines, no parseable events")
             else:
-                print(f"[{time.strftime('%H:%M:%S')}] {len(anomalies)} anomaly(ies) — no new HIGH/CRITICAL")
+                print(f"[{time.strftime('%H:%M:%S')}] No new log lines")
 
             time.sleep(args.interval)
 

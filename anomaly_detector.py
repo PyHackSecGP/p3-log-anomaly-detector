@@ -6,9 +6,9 @@ Produces structured findings before AI enrichment.
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from typing import Optional
+from typing import Any, Optional
 
-from log_parser import LogEvent
+from parsers.base import LogEvent
 
 
 BRUTE_FORCE_THRESHOLD = 5      # failed attempts from same IP within window
@@ -389,13 +389,22 @@ def run_detection(
     events: list[LogEvent],
     allowlist_ips: set[str] | None = None,
     allowlist_users: set[str] | None = None,
+    baseline: "Optional[Any]" = None,
 ) -> list[Anomaly]:
     """Run all detection rules and return deduplicated anomaly list sorted by severity.
 
-    Events from allowlisted IPs or users are silently skipped so trusted
-    hosts (jump boxes, monitoring agents) don't generate noise.
+    When a baseline is provided, rule-based thresholds are augmented with
+    z-score checks — findings that are statistically normal for this system
+    are downgraded from HIGH→MEDIUM or MEDIUM→LOW to reduce noise.
+
+    Args:
+        events: Parsed log events.
+        allowlist_ips: Source IPs to skip entirely.
+        allowlist_users: Usernames to skip entirely.
+        baseline: Optional Baseline instance for statistical context.
     """
     severity_order = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3, "INFO": 4}
+    downgrade_map = {"HIGH": "MEDIUM", "MEDIUM": "LOW"}
 
     filtered = events
     if allowlist_ips or allowlist_users:
@@ -412,6 +421,24 @@ def run_detection(
         + detect_off_hours_logins(filtered)
         + detect_user_enumeration(filtered)
     )
+
+    # Baseline adjustment: downgrade severity when z-score says this count
+    # is statistically normal for this system at this hour of day.
+    if baseline is not None:
+        now_hour = datetime.now().hour
+        for anomaly in all_anomalies:
+            if anomaly.severity in ("CRITICAL", "HIGH", "MEDIUM"):
+                is_anom, z = baseline.is_anomalous(
+                    anomaly.category, now_hour, anomaly.count
+                )
+                if baseline.has_history(anomaly.category) and not is_anom:
+                    # Statistically normal for this system — downgrade one level
+                    new_sev = downgrade_map.get(anomaly.severity)
+                    if new_sev:
+                        anomaly.severity = new_sev
+                        anomaly.description += (
+                            f" [Baseline: z={z:.1f} — normal for this host, severity downgraded]"
+                        )
 
     all_anomalies.sort(key=lambda a: severity_order.get(a.severity, 99))
     return all_anomalies

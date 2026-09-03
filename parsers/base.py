@@ -26,6 +26,23 @@ class LogEvent:
     raw: str = ""
     extra: dict = field(default_factory=dict)
 
+    # Compat properties so anomaly_detector.py works with both old and new schema
+    @property
+    def event_type(self) -> str:
+        return self.extra.get("event_type", "")
+
+    @property
+    def source_ip(self) -> str:
+        return self.ip
+
+    @property
+    def username(self) -> str:
+        return self.user
+
+    @property
+    def hostname(self) -> str:
+        return self.host
+
 
 class Parser(Protocol):
     """Any log parser implements this protocol."""

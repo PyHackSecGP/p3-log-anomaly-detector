@@ -97,6 +97,28 @@ class OllamaClient:
         response = self._post("/api/generate", payload)
         return response.get("response", "").strip()
 
+    def chat(self, messages: list[dict]) -> str:
+        """
+        Multi-turn conversation using /api/chat endpoint.
+
+        This is the correct endpoint for agentic tool-calling loops — it
+        maintains proper role-based context (system/user/assistant) rather
+        than flattening everything into one prompt string.
+
+        Args:
+            messages: List of {"role": "system"|"user"|"assistant", "content": "..."}.
+
+        Returns:
+            Model response text.
+        """
+        payload: dict = {
+            "model": self.model,
+            "messages": messages,
+            "stream": False,
+        }
+        response = self._post("/api/chat", payload)
+        return response.get("message", {}).get("content", "").strip()
+
     def analyze_anomalies(self, anomaly_summary: str, log_sample: str) -> str:
         """
         Ask the model to analyze detected anomalies and provide a threat assessment.
