@@ -175,7 +175,7 @@ SQLite stores hourly counts per event type. 30-day rolling window. Minimum 3 day
 | Flag | Default | Description |
 |---|---|---|
 | `LOG_FILE` | auto-detect | Path to log (`/var/log/auth.log`, `/var/log/secure`, or pass a file) |
-| `--url URL` | `localhost:11434` | Ollama server URL |
+| `--url URL` | `$OLLAMA_HOST` or `localhost:11434` | Ollama server URL (`OLLAMA_HOST` env var sets the default) |
 | `--model MODEL` | `llama3.1:8b` | Model for AI analysis |
 | `--no-ai` | off | Skip Ollama — rule-based output only |
 | `--agentic` | off | Multi-step LLM investigation via tool calls |

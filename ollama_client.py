@@ -5,6 +5,7 @@ Sends structured anomaly summaries and receives threat assessments.
 
 import json
 import logging
+import os
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -12,7 +13,7 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_BASE_URL = "http://localhost:11434"
+DEFAULT_BASE_URL = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
 DEFAULT_MODEL = "llama3.1:8b"
 REQUEST_TIMEOUT = 120  # seconds
 
