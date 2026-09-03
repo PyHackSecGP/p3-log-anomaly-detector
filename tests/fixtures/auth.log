@@ -1,0 +1,4 @@
+May 22 01:00:01 web01 sshd[1234]: Failed password for root from 192.168.1.100 port 22345 ssh2
+May 22 01:00:02 web01 sshd[1234]: Accepted publickey for tony from 10.0.0.1 port 55000 ssh2
+May 22 01:00:03 web01 sudo[9999]: tony : TTY=pts/0 ; PWD=/home/tony ; USER=root ; COMMAND=/bin/ls
+May 22 01:00:04 web01 useradd[2222]: new user: name=hacker, UID=1337, GID=1337
