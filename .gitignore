@@ -6,3 +6,4 @@ sample_auth.log
 *.txt.out
 report.*
 .pytest_cache/
+docs/superpowers/
