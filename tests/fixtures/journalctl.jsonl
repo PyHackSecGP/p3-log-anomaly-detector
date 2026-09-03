@@ -1,0 +1,2 @@
+{"__REALTIME_TIMESTAMP":"1748049601000000","_HOSTNAME":"web01","SYSLOG_IDENTIFIER":"sshd","_PID":"1234","MESSAGE":"Failed password for root from 192.168.1.100 port 22345 ssh2"}
+{"__REALTIME_TIMESTAMP":"1748049602000000","_HOSTNAME":"web01","SYSLOG_IDENTIFIER":"sshd","_PID":"1234","MESSAGE":"Accepted publickey for tony from 10.0.0.1 port 55000 ssh2"}
