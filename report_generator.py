@@ -271,6 +271,113 @@ def generate_agent_report_section(agent_report: "AgentReport", colored: bool = T
     return "\n".join(lines)
 
 
+def generate_sarif_report(
+    anomalies: list[Anomaly],
+    log_path: str,
+    model_used: str,
+) -> str:
+    """
+    Produce a SARIF 2.1.0 report for ingestion by GitHub Security tab,
+    Splunk, DefectDojo, or any SARIF-compatible SIEM/ASPM tool.
+
+    Args:
+        anomalies: Detected anomalies.
+        log_path: Path to the analyzed log file.
+        model_used: Ollama model name used for AI analysis.
+    """
+    severity_map = {
+        "CRITICAL": "error",
+        "HIGH":     "error",
+        "MEDIUM":   "warning",
+        "LOW":      "note",
+        "INFO":     "none",
+    }
+
+    # Build unique rules from distinct MITRE technique IDs seen in findings
+    seen_rules: dict[str, dict] = {}
+    for a in anomalies:
+        rule_id = a.mitre_id or a.category
+        if rule_id not in seen_rules:
+            seen_rules[rule_id] = {
+                "id": rule_id,
+                "name": (a.mitre_name or a.category).replace(" ", ""),
+                "shortDescription": {"text": a.mitre_name or a.category},
+                "fullDescription": {"text": f"MITRE ATT&CK {a.mitre_id}: {a.mitre_name}"},
+                "help": {
+                    "text": f"See https://attack.mitre.org/techniques/{a.mitre_id}/ for details.",
+                    "markdown": f"See [MITRE ATT&CK {a.mitre_id}](https://attack.mitre.org/techniques/{a.mitre_id}/).",
+                },
+                "properties": {
+                    "tags": ["security", "auth-log", a.category],
+                    "precision": "medium",
+                    "problem.severity": severity_map.get(a.severity, "warning"),
+                },
+            }
+
+    results = []
+    for a in anomalies:
+        rule_id = a.mitre_id or a.category
+        result: dict = {
+            "ruleId": rule_id,
+            "level": severity_map.get(a.severity, "warning"),
+            "message": {
+                "text": f"{a.title}: {a.description}",
+            },
+            "locations": [{
+                "physicalLocation": {
+                    "artifactLocation": {"uri": log_path},
+                },
+                "logicalLocations": [{
+                    "name": a.source_ip or a.username or "unknown",
+                    "kind": "address" if a.source_ip else "account",
+                }],
+            }],
+            "properties": {
+                "anomaly_id": a.anomaly_id,
+                "severity": a.severity,
+                "category": a.category,
+                "confidence": a.confidence,
+                "mitre_id": a.mitre_id,
+                "mitre_name": a.mitre_name,
+                "count": a.count,
+                "source_ip": a.source_ip or "",
+                "username": a.username or "",
+                "first_seen": _fmt_dt(a.first_seen),
+                "last_seen": _fmt_dt(a.last_seen),
+            },
+        }
+        if a.raw_events:
+            result["relatedLocations"] = [
+                {"message": {"text": raw[:200]}, "id": i}
+                for i, raw in enumerate(a.raw_events[:3], 1)
+            ]
+        results.append(result)
+
+    sarif = {
+        "$schema": "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json",
+        "version": "2.1.0",
+        "runs": [{
+            "tool": {
+                "driver": {
+                    "name": "P3 AI Log Anomaly Detector",
+                    "version": "2.0.0",
+                    "informationUri": "https://github.com/PyHackSecGP/p3-log-anomaly-detector",
+                    "rules": list(seen_rules.values()),
+                }
+            },
+            "invocations": [{
+                "executionSuccessful": True,
+                "commandLine": f"python main.py {log_path}",
+                "endTimeUtc": datetime.utcnow().isoformat() + "Z",
+                "properties": {"model": model_used},
+            }],
+            "artifacts": [{"location": {"uri": log_path}}],
+            "results": results,
+        }],
+    }
+    return json.dumps(sarif, indent=2)
+
+
 def save_report(content: str, output_path: str | Path) -> None:
     """Write report content to a file."""
     Path(output_path).write_text(content, encoding="utf-8")

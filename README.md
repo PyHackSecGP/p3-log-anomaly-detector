@@ -1,57 +1,172 @@
 # P3 — AI Log Anomaly Detector
 
-Parses Linux auth logs, runs rule-based anomaly detection with MITRE ATT&CK mapping, and sends findings to a local Ollama LLM for AI-powered threat assessment. Alerts via Slack, Discord, or email. Runs as a systemd daemon in watch mode.
+> Linux auth log analysis with MITRE ATT&CK mapping, statistical baselining, and an agentic LLM investigation loop that can block IPs and lock accounts autonomously.
+
+Built to answer a real frustration: grep for brute force isn't enough when the attacker succeeds on attempt 8, escalates to root, and creates a backdoor account — all in 7 minutes. This tool chains those events together and lets a local LLM investigate without phoning home.
 
 ---
 
-## Features
+## What it does
 
-- **Log parsing** — `/var/log/auth.log` (Debian/Ubuntu), `/var/log/secure` (RHEL/CentOS), journalctl JSON export
-- **Detection rules** with MITRE ATT&CK IDs and confidence scores:
-  - SSH brute force — sliding window, per-IP (`T1110`)
-  - Distributed brute force / botnet patterns (`T1110`)
-  - Credential stuffing — failures followed by successful login from same IP (`T1110`)
-  - `sudo`/`su` failures and privilege escalation (`T1548`)
-  - New user account creation via `useradd` (`T1136`)
-  - Direct root logins (`T1078`)
-- **AI threat assessment** via local Ollama — structured report, IOC extraction, mitigations
-- **IP reputation** via AbuseIPDB — abuse score + country code per finding
-- **Known-good allowlist** — `allowlist.yaml` suppresses trusted IPs and users (jump boxes, monitoring agents)
-- **Alerting** — Slack webhook, Discord webhook, email (SMTP)
-- **Watch mode** — daemon that tails the log and fires alerts on new CRITICAL/HIGH findings
-- **Outputs** — color terminal report, JSON, plain text
-- **Zero third-party dependencies** — Python 3.11+ stdlib only
+```
+/var/log/auth.log ──► Parse ──► Detect ──► Baseline ──► AI Agent ──► Block/Alert
+                                  │            │              │
+                              9 rules      z-score       6 tool calls
+                              MITRE IDs   30-day hist   real /api/chat
+```
+
+1. **Parses** auth logs, journalctl JSON, nginx access logs (auto-detected)
+2. **Detects** attacks with 9 rule-based detectors mapped to MITRE ATT&CK techniques + confidence scores
+3. **Baselines** counts against 30-day rolling history — if 50 SSH failures/hour is normal for your system, severity adjusts automatically
+4. **Agents** an LLM through a real multi-step investigation: pivot on IPs, check timelines, look for lateral movement, correlate events
+5. **Acts** — optionally blocks source IPs via `iptables` and locks compromised accounts via `passwd -l`
+
+Zero third-party Python dependencies. Runs entirely on your network with local Ollama.
 
 ---
 
-## Quickstart
+## Quick start
 
 ```bash
-# Generate a sample log and run without Ollama
-python3 main.py --generate-sample
-python3 main.py sample_auth.log --no-ai
+git clone https://github.com/PyHackSecGP/p3-log-anomaly-detector
+cd p3-log-anomaly-detector
 
-# Run against live system logs with AI
-sudo python3 main.py /var/log/auth.log --url http://YOUR_OLLAMA_IP:11434 --model llama3.2:3b
-
-# Save both text and JSON reports
-sudo python3 main.py /var/log/auth.log --no-ai --out report.txt --json report.json
-
-# With AbuseIPDB enrichment
-sudo python3 main.py /var/log/auth.log --no-ai --abuseipdb YOUR_KEY
-
-# With known-good allowlist
-sudo python3 main.py /var/log/auth.log --no-ai --allowlist allowlist.yaml
-
-# Alert to Slack on CRITICAL/HIGH findings
-sudo python3 main.py /var/log/auth.log --no-ai \
-  --webhook https://hooks.slack.com/services/...
-
-# Watch mode — continuous scan every 60s, alerts on new findings
-sudo python3 main.py /var/log/auth.log --watch --interval 60 --no-ai \
-  --allowlist allowlist.yaml \
-  --webhook https://hooks.slack.com/services/...
+# Zero setup — generate a sample attack log and run:
+python main.py --generate-sample
+python main.py sample_auth.log --no-ai
 ```
+
+**With local Ollama (no cloud, no API keys):**
+```bash
+python main.py sample_auth.log \
+  --url http://YOUR_OLLAMA_IP:11434 \
+  --model hermes3:70b
+```
+
+**Agentic mode — LLM drives its own investigation:**
+```bash
+python main.py sample_auth.log \
+  --agentic \
+  --url http://YOUR_OLLAMA_IP:11434 \
+  --model hermes3:70b
+```
+
+**Preview remediation without executing (safe to run):**
+```bash
+python main.py sample_auth.log \
+  --agentic --act --dry-run \
+  --url http://YOUR_OLLAMA_IP:11434
+```
+
+**Execute remediation — block IPs + lock accounts (needs root):**
+```bash
+sudo python main.py /var/log/auth.log \
+  --agentic --act \
+  --allowlist allowlist.yaml \
+  --url http://YOUR_OLLAMA_IP:11434
+```
+
+---
+
+## Example output
+
+### Rule-based report
+
+```
+═══════════════════════════════════════════════════════════════════
+  AI LOG ANOMALY DETECTOR — SECURITY REPORT
+═══════════════════════════════════════════════════════════════════
+  Anomalies: CRITICAL: 1  HIGH: 3  MEDIUM: 2  LOW: 0
+═══════════════════════════════════════════════════════════════════
+
+[IP-001] CRITICAL — Successful login after 8 failures from 192.168.1.100 [T1110] 40% conf
+  IP 192.168.1.100 had 8 failed attempts before successfully authenticating.
+  Possible credential stuffing or brute force success.
+  IP: 192.168.1.100  |  Count: 9  |  01:00:01 → 01:05:00
+
+[PE-001] HIGH — su to root detected [T1548] 85% conf
+  Session opened as root via su by user 'backup'.
+
+[PE-002] HIGH — New user account created [T1136] 100% conf
+  useradd called 1 time(s). User: hacker (UID 1337).
+
+[OH-001] MEDIUM — Off-hours login from 10.0.1.1 [T1078] 70% conf
+  SSH login at 02:00. User: tony. [Baseline: z=0.3 — normal, severity downgraded]
+```
+
+### Agentic investigation
+
+The agent uses real multi-turn conversation (`/api/chat`) to drive its own investigation:
+
+```
+AGENTIC THREAT ASSESSMENT
+─────────────────────────────────────────────────────────────────
+Risk Level: CRITICAL
+
+  IP 192.168.1.100 brute-forced 'backup' (8 fails → success at 01:05),
+  escalated to root via su after 3 sudo failures, then created backdoor
+  account 'hacker' (UID 1337). Full kill chain in 7 minutes:
+  Initial Access [T1110] → Privilege Escalation [T1548] → Persistence [T1136]
+
+Indicators of Compromise:
+  • 192.168.1.100 (attacker source IP)
+  • backup (compromised credential)
+  • hacker (backdoor account, UID 1337)
+
+Recommendations:
+  → passwd -l backup
+  → userdel -r hacker
+  → iptables -I INPUT -s 192.168.1.100 -j DROP
+  → grep -r hacker /etc/sudoers /etc/cron* /etc/passwd
+
+Investigation Trace:
+  Step 1: search_ip(ip='192.168.1.100')
+    ↳ 9 events: 8 failures then accepted password at 01:05:00
+  Step 2: check_lateral_movement(username='backup')
+    ↳ Single source IP — no lateral movement detected
+  Step 3: get_timeline(anchor='2026-05-22T01:05:00', before=5, after=5)
+    ↳ Kill chain: fail×8 → login → sudo fail×3 → su root → useradd hacker
+  Step 4: get_anomaly_context(anomaly_id='PE-003')
+    ↳ useradd hacker UID=1337 at 01:07:00
+
+Actions taken (--act mode):
+  → BLOCKED 192.168.1.100 via iptables -I INPUT -s 192.168.1.100 -j DROP
+  → LOCKED account 'backup' via passwd -l backup
+```
+
+---
+
+## Detection rules
+
+| ID format | MITRE | Rule | Severity |
+|---|---|---|---|
+| `BF-xxx` | T1110 | SSH brute force — ≥5 failures from one IP in 10 min | MEDIUM→CRITICAL |
+| `IP-xxx` | T1110 | Distributed brute force — ≥10 IPs, ≥20 total failures | HIGH |
+| `IP-xxx` | T1110 | Credential stuffing — success after prior failures from same IP | CRITICAL |
+| `PE-xxx` | T1548 | Privilege escalation — sudo/su failures, su-to-root | HIGH |
+| `PE-xxx` | T1136 | Account creation — useradd called | HIGH |
+| `PE-xxx` | T1078 | Root login — direct SSH as root | CRITICAL |
+| `OH-xxx` | T1078 | Off-hours login — SSH success 02:00–05:00 | MEDIUM |
+| `UE-xxx` | T1589 | User enumeration — ≥8 distinct invalid usernames from one IP | MEDIUM→HIGH |
+| `WEB-xxx` | T1595 | Web scanner — known scanner user agent (sqlmap, nikto, ffuf…) | HIGH |
+| `WEB-4XX-xxx` | T1595 | 4xx flood — ≥20 client errors from one IP | MEDIUM→HIGH |
+| `WEB-PROBE-xxx` | T1083 | Sensitive path probing — ≥5 admin/config paths hit | HIGH |
+
+---
+
+## Statistical baseline
+
+After 3 days, the tool learns what's normal for **your** system:
+
+```
+Your system at noon: 200 SSH failures/hour (automation, scanners — normal)
+Your system at 3am:  0 SSH failures/hour
+
+Same 200 failures arrive at 3am → z-score = 4.7 → CRITICAL (real attack)
+Same 200 failures arrive at noon → z-score = 0.1 → downgraded to MEDIUM (noise)
+```
+
+SQLite stores hourly counts per event type. 30-day rolling window. Minimum 3 days before baseline adjustments activate — no false negatives during the learning period.
 
 ---
 
@@ -59,185 +174,102 @@ sudo python3 main.py /var/log/auth.log --watch --interval 60 --no-ai \
 
 | Flag | Default | Description |
 |---|---|---|
-| `LOG_FILE` | auto-detect | Path to auth log (`/var/log/auth.log` or `/var/log/secure`) |
-| `--url URL` | `http://localhost:11434` | Ollama server URL (or set `OLLAMA_HOST`) |
-| `--model MODEL` | `llama3.1:8b` | Ollama model for AI analysis |
-| `--no-ai` | off | Skip AI — rule-based findings only |
-| `--format` | `auto` | `auto` \| `auth` \| `journalctl` |
-| `--allowlist FILE` | none | YAML file of trusted IPs/users to skip |
-| `--abuseipdb KEY` | none | AbuseIPDB API key (or `ABUSEIPDB_API_KEY` env var) |
-| `--webhook URL` | none | Slack or Discord webhook URL (or `ALERT_WEBHOOK_URL`) |
-| `--email` | off | Send SMTP email alert (configure via `ALERT_SMTP_*` env vars) |
-| `--watch` | off | Watch mode: re-scan every `--interval` seconds |
-| `--interval SECS` | `60` | Scan interval in watch mode |
-| `--json FILE` | none | Save JSON report to file |
-| `--out FILE` | none | Save plain text report to file |
-| `--no-color` | off | Disable ANSI colors |
-| `--verbose / -v` | off | Show per-IP AbuseIPDB lookup results |
-| `--list-models` | off | List models on Ollama server and exit |
-| `--generate-sample` | off | Write `sample_auth.log` for testing and exit |
+| `LOG_FILE` | auto-detect | Path to log (`/var/log/auth.log`, `/var/log/secure`, or pass a file) |
+| `--url URL` | `localhost:11434` | Ollama server URL |
+| `--model MODEL` | `llama3.1:8b` | Model for AI analysis |
+| `--no-ai` | off | Skip Ollama — rule-based output only |
+| `--agentic` | off | Multi-step LLM investigation via tool calls |
+| `--act` | off | Execute remediation (block IPs, lock users) — **requires root** |
+| `--dry-run` | off | Show what `--act` would do without executing anything |
+| `--allowlist FILE` | none | YAML of trusted IPs/users to suppress |
+| `--abuseipdb KEY` | none | AbuseIPDB IP reputation enrichment |
+| `--webhook URL` | none | Slack/Discord webhook for HIGH/CRITICAL alerts |
+| `--email` | off | SMTP email alert |
+| `--watch` | off | Tail mode — scan new bytes every `--interval` seconds |
+| `--interval N` | 60 | Seconds between watch-mode scans |
+| `--json FILE` | none | Save JSON report |
+| `--sarif FILE` | none | Save SARIF 2.1.0 (GitHub Security tab, DefectDojo, Splunk) |
+| `--out FILE` | none | Save plain text report |
+| `--format` | auto | `auto` \| `auth` \| `journalctl` \| `nginx` |
+| `--generate-sample` | off | Write `sample_auth.log` for local testing |
 
 ---
 
-## Alerting
-
-### Slack / Discord Webhook
-
-Works with any Slack incoming webhook or Discord webhook URL — auto-detected by URL:
+## Watch mode
 
 ```bash
-# Slack
-export ALERT_WEBHOOK_URL=https://hooks.slack.com/services/T.../B.../...
-# Discord
-export ALERT_WEBHOOK_URL=https://discord.com/api/webhooks/.../.../
-
-python3 main.py /var/log/auth.log --no-ai --webhook "$ALERT_WEBHOOK_URL"
-```
-
-Alerts fire on CRITICAL and HIGH findings only. Message includes severity, MITRE ID, confidence, source IP, AbuseIPDB score, and AI assessment summary (truncated to 800 chars).
-
-### Email (SMTP)
-
-```bash
-export ALERT_SMTP_HOST=smtp.gmail.com
-export ALERT_SMTP_PORT=587
-export ALERT_SMTP_USER=you@gmail.com
-export ALERT_SMTP_PASS=your_app_password    # Gmail App Password
-export ALERT_TO=alerts@yourdomain.com
-
-python3 main.py /var/log/auth.log --email
-```
-
----
-
-## Allowlist
-
-`allowlist.yaml` — skip events from trusted sources:
-
-```yaml
-trusted_ips:
-  - 10.0.1.1        # jump box
-  - 192.168.1.1     # monitoring agent
-
-trusted_users:
-  - prometheus
-  - ansible
-  - backup
-```
-
-Pass via `--allowlist allowlist.yaml`. Allowlisted events are silently skipped before detection runs.
-
----
-
-## Watch Mode / Daemon
-
-Run as a persistent background process that tails the log and fires alerts on new HIGH/CRITICAL findings:
-
-```bash
-python3 main.py /var/log/auth.log --watch --interval 60 --no-ai \
+sudo python main.py /var/log/auth.log \
+  --watch --interval 60 \
   --allowlist allowlist.yaml \
-  --webhook "$ALERT_WEBHOOK_URL"
+  --webhook "$SLACK_WEBHOOK" \
+  --url http://YOUR_OLLAMA_IP:11434
 ```
 
-Tracks seen anomaly IDs across scans — only alerts on *new* findings, not the same event every 60 seconds.
-
-### systemd Service
-
-```bash
-# Copy files
-sudo cp -r . /opt/p3-log-anomaly-detector/
-sudo cp p3-anomaly-detector.service /etc/systemd/system/
-
-# Set env vars (webhook URL, Ollama host, etc.)
-sudo systemctl edit p3-anomaly-detector
-# Add:
-# [Service]
-# Environment=ALERT_WEBHOOK_URL=https://hooks.slack.com/services/...
-# Environment=OLLAMA_HOST=http://YOUR_OLLAMA_IP:11434
-
-sudo systemctl daemon-reload
-sudo systemctl enable --now p3-anomaly-detector
-sudo systemctl status p3-anomaly-detector
-```
+- **Tail-based**: only reads new bytes since last scan (byte position + inode tracked in SQLite)
+- **Rotation-aware**: inode change or file shrink resets position to 0
+- **Persistent state**: seen anomaly IDs survive daemon restarts — no duplicate alerts
+- **Systemd ready**: `p3-anomaly-detector.service` included
 
 ---
 
-## Detection Rules
-
-### Brute Force — `T1110`
-- ≥5 SSH failures from one IP within 10 minutes
-- Severity: MEDIUM (5+) → HIGH (20+) → CRITICAL (50+)
-- Confidence scales with attempt count
-
-### Distributed Brute Force — `T1110`
-- ≥10 unique source IPs with combined ≥20 failures
-- Indicates botnet/distributed attack, not single-IP brute force
-
-### Credential Stuffing — `T1110`
-- Successful login from an IP with prior failures in same session
-- Always CRITICAL — indicates a brute force that succeeded
-
-### Privilege Escalation — `T1548`
-- `sudo` authentication failures per user
-- `su` sessions opened as root
-
-### Account Creation — `T1136`
-- `useradd` calls — always HIGH, confidence 1.0
-
-### Root Login — `T1078`
-- Direct SSH login as root — always CRITICAL, confidence 1.0
-
----
-
-## Exit Codes
-
-| Code | Meaning |
-|---|---|
-| `0` | No anomalies / all low severity |
-| `1` | HIGH severity anomalies found |
-| `2` | CRITICAL severity anomalies found |
-
-Use in cron for scripted alerting:
+## SARIF output
 
 ```bash
-python3 main.py /var/log/auth.log --no-ai --json /tmp/auth-daily.json
-status=$?
-if [ "$status" -ge 1 ]; then
-    mail -s "ALERT: auth anomalies" you@email.com < /tmp/auth-daily.json
-fi
+python main.py /var/log/auth.log --no-ai --sarif findings.sarif
 ```
+
+Compatible with:
+- GitHub Security tab (upload as code scanning artifact)
+- DefectDojo (import SARIF findings)
+- Splunk SIEM (SARIF ingestion)
+- Any OASIS SARIF 2.1.0 consumer
 
 ---
 
 ## Architecture
 
 ```
-main.py                 CLI entry point, watch mode, alert orchestration
-log_parser.py           Auth log → LogEvent objects (syslog format)
-journalctl_parser.py    journalctl JSON export → LogEvent objects
-anomaly_detector.py     Rule engine → Anomaly objects with MITRE IDs + confidence
-ollama_client.py        Ollama REST client (scheme-validated, no file:// risk)
-report_generator.py     Text + JSON report builder
-email_alerts.py         SMTP alerting
-slack_alerts.py         Slack + Discord webhook alerting
-abuseipdb.py            IP reputation enrichment via AbuseIPDB API
-allowlist.py            YAML allowlist loader
-allowlist.yaml          Trusted IPs and users (edit for your environment)
-suppressions.yaml       P1 suppression rules for SAST scan results
-p3-anomaly-detector.service  systemd unit for watch-mode daemon
+main.py                  Entry point, watch daemon, alert orchestration
+parsers/
+  auth_parser.py         /var/log/auth.log → LogEvent
+  journalctl_parser.py   journalctl JSON   → LogEvent
+  nginx_parser.py        nginx access log  → LogEvent
+  base.py                Unified LogEvent dataclass + Parser protocol
+anomaly_detector.py      8 auth detection rules, MITRE IDs, confidence scores
+nginx_detector.py        4 web detection rules
+baseline.py              SQLite z-score baseline (30-day rolling, per-hour)
+ollama_client.py         Ollama /api/generate + /api/chat
+agent.py                 LogAnalysisAgent — 6-tool /api/chat investigation loop
+actions.py               block_ip (iptables), lock_user (passwd -l), audit log
+report_generator.py      Text, JSON, SARIF 2.1.0 output
+state.py                 SQLite watch state (file positions, seen anomaly IDs)
 ```
 
-### Anomaly Schema
+---
 
-| Field | Type | Description |
-|---|---|---|
-| `anomaly_id` | `str` | Unique ID per run (`BF-001`, `PE-002`, etc.) |
-| `severity` | `str` | `CRITICAL \| HIGH \| MEDIUM \| LOW \| INFO` |
-| `category` | `str` | `brute_force \| privilege_escalation \| unusual_ip` |
-| `mitre_id` | `str` | ATT&CK technique ID (`T1110`, `T1548`, etc.) |
-| `mitre_name` | `str` | ATT&CK technique name |
-| `confidence` | `float` | 0–1 detection confidence (scales with event count) |
-| `source_ip` | `str` | Source IP address if applicable |
-| `username` | `str` | Username if applicable |
-| `abuse_score` | `int` | AbuseIPDB confidence score (−1 = not checked) |
-| `geo_country` | `str` | Country code from AbuseIPDB |
+## Tests
+
+```bash
+pip install pytest
+pytest tests/ -v
+```
+
+54 tests covering: all detection rules, agent tool dispatch, `/api/chat` enforcement,
+conversation message structure, SARIF schema, parser sniff/parse, baseline logic.
+
+---
+
+## Allowlist
+
+Edit `allowlist.yaml` to suppress trusted sources before running against live logs:
+
+```yaml
+trusted_ips:
+  - 10.0.1.1       # jump box
+  - 192.168.1.1    # monitoring agent
+
+trusted_users:
+  - prometheus
+  - ansible
+  - backup-agent
+```

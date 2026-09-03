@@ -125,15 +125,17 @@ class LogAnalysisAgent:
       5. Optionally execute remediation actions via actions.py
     """
 
-    def __init__(self, client: OllamaClient, act: bool = False) -> None:
+    def __init__(self, client: OllamaClient, act: bool = False, dry_run: bool = False) -> None:
         """
         Args:
             client: Configured OllamaClient.
             act: If True, execute remediation actions (block IPs, lock users)
                  when conclusion is HIGH or CRITICAL.
+            dry_run: If True with act, log what would happen without executing.
         """
         self.client = client
         self.act = act
+        self.dry_run = dry_run
         self.steps: list[AgentStep] = []
         self._called_tools: set[str] = set()
 
@@ -184,7 +186,7 @@ class LogAnalysisAgent:
                     steps=self.steps,
                     raw_conclusion=response,
                 )
-                if self.act:
+                if self.act or self.dry_run:
                     report.actions_taken = self._execute_actions(report)
                 return report
 
@@ -330,7 +332,7 @@ class LogAnalysisAgent:
                 steps=self.steps,
                 raw_conclusion=response,
             )
-            if self.act:
+            if self.act or self.dry_run:
                 report.actions_taken = self._execute_actions(report)
             return report
         return AgentReport(
@@ -354,12 +356,11 @@ class LogAnalysisAgent:
             return ["actions.py not found — remediation skipped"]
 
         taken: list[str] = []
+        dry = self.dry_run
         for ioc in report.iocs:
             # IPs look like digits and dots
             if all(c.isdigit() or c == "." for c in ioc) and ioc.count(".") == 3:
-                result = block_ip(ioc)
-                taken.append(result)
+                taken.append(block_ip(ioc, dry_run=dry))
             else:
-                result = lock_user(ioc)
-                taken.append(result)
+                taken.append(lock_user(ioc, dry_run=dry))
         return taken

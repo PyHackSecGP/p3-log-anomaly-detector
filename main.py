@@ -35,6 +35,7 @@ from report_generator import (
     build_log_sample,
     generate_agent_report_section,
     generate_json_report,
+    generate_sarif_report,
     generate_text_report,
     save_report,
 )
@@ -95,10 +96,22 @@ def parse_args() -> argparse.Namespace:
         help="Action mode (requires --agentic + root): execute remediation — block IPs via iptables, lock compromised accounts",
     )
     parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        dest="dry_run",
+        help="Preview remediation actions without executing (use with --agentic --act to see what would be blocked/locked)",
+    )
+    parser.add_argument(
         "--json",
         metavar="FILE",
         dest="json_out",
         help="Also save a JSON report to FILE",
+    )
+    parser.add_argument(
+        "--sarif",
+        metavar="FILE",
+        dest="sarif_out",
+        help="Save SARIF 2.1.0 report to FILE (compatible with GitHub Security tab, Splunk, Defect Dojo)",
     )
     parser.add_argument(
         "--out",
@@ -350,7 +363,7 @@ def main(args=None) -> int:
                         flush=True,
                     )
                     try:
-                        agent = LogAnalysisAgent(client, act=args.act)
+                        agent = LogAnalysisAgent(client, act=args.act, dry_run=getattr(args, "dry_run", False))
                         agent_report = agent.analyze(events, anomalies)
                         print(
                             f"  Agent completed in {len(agent_report.steps)} step(s). "
@@ -401,6 +414,13 @@ def main(args=None) -> int:
         )
         save_report(json_report, args.json_out)
         print(f"JSON report saved: {args.json_out}")
+
+    if args.sarif_out:
+        sarif_report = generate_sarif_report(
+            anomalies, log_path=log_path, model_used=model_used,
+        )
+        save_report(sarif_report, args.sarif_out)
+        print(f"SARIF report saved: {args.sarif_out}")
 
     # Email alert for CRITICAL or HIGH findings
     if args.email:
