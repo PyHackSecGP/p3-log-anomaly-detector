@@ -25,9 +25,11 @@ from slack_alerts import send_webhook
 from journalctl_parser import parse_journalctl_file
 from log_parser import parse_file
 from ollama_client import OllamaClient, DEFAULT_BASE_URL, DEFAULT_MODEL
+from agent import LogAnalysisAgent
 from report_generator import (
     build_anomaly_summary_text,
     build_log_sample,
+    generate_agent_report_section,
     generate_json_report,
     generate_text_report,
     save_report,
@@ -77,6 +79,11 @@ def parse_args() -> argparse.Namespace:
         "--no-ai",
         action="store_true",
         help="Skip AI analysis, output rule-based findings only",
+    )
+    parser.add_argument(
+        "--agentic",
+        action="store_true",
+        help="Agentic mode: LLM drives a multi-step investigation loop (tool calls, correlation, final report)",
     )
     parser.add_argument(
         "--json",
@@ -288,6 +295,7 @@ def main(args=None) -> int:
 
     # AI analysis
     ai_assessment: str | None = None
+    agent_report = None
     model_used = args.model
 
     if not args.no_ai:
@@ -309,14 +317,30 @@ def main(args=None) -> int:
                 client.model = model_used
 
             if anomalies:
-                print(f"  Sending {len(anomalies)} anomalies to {model_used} for analysis ...", flush=True)
-                summary = build_anomaly_summary_text(anomalies)
-                sample = build_log_sample(events)
-                try:
-                    ai_assessment = client.analyze_anomalies(summary, sample)
-                    print("  AI analysis complete.", flush=True)
-                except RuntimeError as exc:
-                    print(f"  WARNING: AI analysis failed: {exc}", flush=True)
+                if args.agentic:
+                    print(
+                        f"  Agentic mode: running multi-step investigation with {model_used} ...",
+                        flush=True,
+                    )
+                    try:
+                        agent = LogAnalysisAgent(client)
+                        agent_report = agent.analyze(events, anomalies)
+                        print(
+                            f"  Agent completed in {len(agent_report.steps)} step(s). "
+                            f"Risk: {agent_report.risk_level}",
+                            flush=True,
+                        )
+                    except Exception as exc:
+                        print(f"  WARNING: Agentic analysis failed: {exc}", flush=True)
+                else:
+                    print(f"  Sending {len(anomalies)} anomalies to {model_used} for analysis ...", flush=True)
+                    summary = build_anomaly_summary_text(anomalies)
+                    sample = build_log_sample(events)
+                    try:
+                        ai_assessment = client.analyze_anomalies(summary, sample)
+                        print("  AI analysis complete.", flush=True)
+                    except RuntimeError as exc:
+                        print(f"  WARNING: AI analysis failed: {exc}", flush=True)
             else:
                 print("  No anomalies to analyze. Skipping AI.", flush=True)
 
@@ -327,6 +351,8 @@ def main(args=None) -> int:
         model_used=model_used,
         colored=colored,
     )
+    if agent_report:
+        text_report += "\n" + generate_agent_report_section(agent_report, colored=colored)
     print(text_report)
 
     if args.text_out:

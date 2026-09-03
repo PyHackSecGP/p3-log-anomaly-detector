@@ -223,6 +223,54 @@ def generate_json_report(
     return json.dumps(report, indent=2)
 
 
+def generate_agent_report_section(agent_report: "AgentReport", colored: bool = True) -> str:
+    """
+    Render an AgentReport as a terminal-friendly text block for appending to
+    the standard text report.
+
+    Args:
+        agent_report: Completed AgentReport from LogAnalysisAgent.analyze().
+        colored: Whether to include ANSI color codes.
+    """
+    def bold(text: str) -> str:
+        return f"{BOLD}{text}{RESET}" if colored else text
+
+    def c(text: str, sev: str) -> str:
+        return _colorize(text, sev) if colored else text
+
+    sev = agent_report.risk_level
+    lines = [
+        bold("AGENTIC THREAT ASSESSMENT"),
+        "-" * 65,
+        f"  Risk Level : {c(sev, sev)}",
+        "",
+        f"  {agent_report.summary}",
+        "",
+    ]
+
+    if agent_report.iocs:
+        lines.append("  Indicators of Compromise:")
+        for ioc in agent_report.iocs:
+            lines.append(f"    • {ioc}")
+        lines.append("")
+
+    if agent_report.recommendations:
+        lines.append("  Recommendations:")
+        for rec in agent_report.recommendations:
+            lines.append(f"    → {rec}")
+        lines.append("")
+
+    if agent_report.steps:
+        lines.append("  Investigation Trace:")
+        for step in agent_report.steps:
+            args_str = ", ".join(f"{k}={v!r}" for k, v in step.args.items())
+            lines.append(f"    Step {step.step}: {step.tool}({args_str})")
+            lines.append(f"      ↳ {step.result_summary[:120]}")
+        lines.append("")
+
+    return "\n".join(lines)
+
+
 def save_report(content: str, output_path: str | Path) -> None:
     """Write report content to a file."""
     Path(output_path).write_text(content, encoding="utf-8")

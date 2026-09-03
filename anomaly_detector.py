@@ -298,6 +298,93 @@ def detect_unusual_ips(events: list[LogEvent]) -> list[Anomaly]:
     return anomalies
 
 
+_OFF_HOURS_START = 2   # 02:00 local
+_OFF_HOURS_END   = 5   # 05:00 local
+_USER_ENUM_THRESHOLD = 8  # distinct invalid usernames from one IP
+
+
+def detect_off_hours_logins(events: list[LogEvent]) -> list[Anomaly]:
+    """
+    Flag successful SSH logins between 02:00–05:00 local time.
+    Legitimate users rarely log in at these hours; attackers often do.
+    MITRE T1078 — Valid Accounts.
+    """
+    anomalies: list[Anomaly] = []
+    seq = 1
+
+    by_ip: dict[str, list[LogEvent]] = defaultdict(list)
+    for ev in events:
+        if ev.event_type in ("ssh_accepted_password", "ssh_accepted_publickey"):
+            if ev.timestamp and _OFF_HOURS_START <= ev.timestamp.hour < _OFF_HOURS_END:
+                if ev.source_ip:
+                    by_ip[ev.source_ip].append(ev)
+
+    for ip, evs in by_ip.items():
+        users = {e.username for e in evs if e.username}
+        anomalies.append(Anomaly(
+            anomaly_id=f"OH-{seq:03d}",
+            severity="MEDIUM",
+            category="off_hours_login",
+            mitre_id="T1078",
+            mitre_name="Valid Accounts",
+            confidence=0.7,
+            title=f"Off-hours login from {ip}",
+            description=(
+                f"Successful SSH login(s) from {ip} between "
+                f"{_OFF_HOURS_START:02d}:00–{_OFF_HOURS_END:02d}:00. "
+                f"User(s): {', '.join(users)}. Count: {len(evs)}."
+            ),
+            source_ip=ip,
+            username=", ".join(users) or None,
+            count=len(evs),
+            first_seen=evs[0].timestamp,
+            last_seen=evs[-1].timestamp,
+            raw_events=[e.raw for e in evs[:3]],
+        ))
+        seq += 1
+
+    return anomalies
+
+
+def detect_user_enumeration(events: list[LogEvent]) -> list[Anomaly]:
+    """
+    Detect user enumeration: one IP probing many distinct invalid usernames.
+    Attackers enumerate valid usernames before targeted brute force.
+    MITRE T1589.003 — Gather Victim Identity Information: Employee Names.
+    """
+    invalid_by_ip: dict[str, set[str]] = defaultdict(set)
+
+    for ev in events:
+        if ev.event_type == "ssh_invalid_user" and ev.source_ip and ev.username:
+            invalid_by_ip[ev.source_ip].add(ev.username)
+
+    anomalies: list[Anomaly] = []
+    seq = 1
+
+    for ip, usernames in invalid_by_ip.items():
+        if len(usernames) >= _USER_ENUM_THRESHOLD:
+            severity = "HIGH" if len(usernames) >= 20 else "MEDIUM"
+            anomalies.append(Anomaly(
+                anomaly_id=f"UE-{seq:03d}",
+                severity=severity,
+                category="user_enumeration",
+                mitre_id="T1589",
+                mitre_name="Gather Victim Identity Information",
+                confidence=min(1.0, round(len(usernames) / 30, 2)),
+                title=f"User enumeration from {ip} ({len(usernames)} usernames)",
+                description=(
+                    f"IP {ip} probed {len(usernames)} distinct invalid usernames — "
+                    f"consistent with automated account enumeration before targeted attack. "
+                    f"Sample usernames: {', '.join(list(usernames)[:5])}."
+                ),
+                source_ip=ip,
+                count=len(usernames),
+            ))
+            seq += 1
+
+    return anomalies
+
+
 def run_detection(
     events: list[LogEvent],
     allowlist_ips: set[str] | None = None,
@@ -322,6 +409,8 @@ def run_detection(
         detect_brute_force(filtered)
         + detect_privilege_escalation(filtered)
         + detect_unusual_ips(filtered)
+        + detect_off_hours_logins(filtered)
+        + detect_user_enumeration(filtered)
     )
 
     all_anomalies.sort(key=lambda a: severity_order.get(a.severity, 99))
