@@ -20,6 +20,7 @@ import os
 from abuseipdb import enrich_anomalies
 from allowlist import load_allowlist
 from anomaly_detector import run_detection
+import mitre
 from baseline import Baseline
 from email_alerts import send_alert
 from nginx_detector import run_nginx_detection
@@ -179,6 +180,11 @@ def parse_args() -> argparse.Namespace:
         "--generate-sample",
         action="store_true",
         help="Generate a sample auth.log for testing and exit",
+    )
+    parser.add_argument(
+        "--mitre-report",
+        action="store_true",
+        help="Print a MITRE ATT&CK coverage heatmap after detection",
     )
     return parser.parse_args()
 
@@ -421,6 +427,10 @@ def main(args=None) -> int:
         )
         save_report(sarif_report, args.sarif_out)
         print(f"SARIF report saved: {args.sarif_out}")
+
+    if args.mitre_report:
+        print()
+        print(mitre.render_heatmap(mitre.summarize_coverage(anomalies)))
 
     # Email alert for CRITICAL or HIGH findings
     if args.email:

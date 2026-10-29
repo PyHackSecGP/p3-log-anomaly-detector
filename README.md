@@ -226,6 +226,44 @@ Compatible with:
 
 ---
 
+## MITRE ATT&CK coverage
+
+Formal T-code catalog lives in [`mitre_mapping.json`](mitre_mapping.json). Every
+detection rule in `anomaly_detector.py` / `nginx_detector.py` tags findings
+with a `mitre_id`. The 8 techniques currently covered:
+
+| Tactic | Technique |
+|---|---|
+| Reconnaissance | T1589 Gather Victim Identity Information, T1595 Active Scanning |
+| Initial Access | T1190 Exploit Public-Facing Application |
+| Credential Access | T1110 Brute Force |
+| Discovery | T1083 File and Directory Discovery |
+| Persistence | T1136 Create Account |
+| Privilege Escalation | T1078 Valid Accounts, T1548 Abuse Elevation Control Mechanism |
+
+Print a per-run heatmap:
+
+```bash
+python main.py sample_auth.log --no-ai --mitre-report
+```
+
+Sample output:
+
+```
+MITRE ATT&CK Coverage
+=====================
+Total events: 5  |  Unique techniques: 3
+
+[Credential Access]
+  T1110    Brute Force                                   3  ███
+[Persistence]
+  T1136    Create Account                                1  █
+[Privilege Escalation]
+  T1548    Abuse Elevation Control Mechanism             1  █
+```
+
+---
+
 ## Architecture
 
 ```

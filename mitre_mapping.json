@@ -1,0 +1,50 @@
+{
+  "T1078": {
+    "name": "Valid Accounts",
+    "tactic": "Privilege Escalation",
+    "url": "https://attack.mitre.org/techniques/T1078/",
+    "rules": ["direct_root_login"]
+  },
+  "T1083": {
+    "name": "File and Directory Discovery",
+    "tactic": "Discovery",
+    "url": "https://attack.mitre.org/techniques/T1083/",
+    "rules": ["nginx_sensitive_path_probe"]
+  },
+  "T1110": {
+    "name": "Brute Force",
+    "tactic": "Credential Access",
+    "url": "https://attack.mitre.org/techniques/T1110/",
+    "rules": ["ssh_brute_force", "credential_stuffing_ip_distribution"]
+  },
+  "T1136": {
+    "name": "Create Account",
+    "tactic": "Persistence",
+    "url": "https://attack.mitre.org/techniques/T1136/",
+    "rules": ["new_user_account_created"]
+  },
+  "T1190": {
+    "name": "Exploit Public-Facing Application",
+    "tactic": "Initial Access",
+    "url": "https://attack.mitre.org/techniques/T1190/",
+    "rules": ["nginx_exploit_attempt"]
+  },
+  "T1548": {
+    "name": "Abuse Elevation Control Mechanism",
+    "tactic": "Privilege Escalation",
+    "url": "https://attack.mitre.org/techniques/T1548/",
+    "rules": ["repeated_sudo_failure", "su_to_root"]
+  },
+  "T1589": {
+    "name": "Gather Victim Identity Information",
+    "tactic": "Reconnaissance",
+    "url": "https://attack.mitre.org/techniques/T1589/",
+    "rules": ["user_enumeration"]
+  },
+  "T1595": {
+    "name": "Active Scanning",
+    "tactic": "Reconnaissance",
+    "url": "https://attack.mitre.org/techniques/T1595/",
+    "rules": ["nginx_path_scanning", "nginx_4xx_burst"]
+  }
+}
